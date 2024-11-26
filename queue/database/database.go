@@ -47,7 +47,7 @@ type Message struct {
 
 	Message string `gorm:"not null"`
 
-	KV []KV `gorm:"foreignKey:TenantID,QueueID,MessageID;references:TenantID,QueueID,ID"`
+	KV []KV `gorm:"foreignKey:MessageID;references:ID"`
 }
 
 func (message *Message) ToModel() *models.Message {
