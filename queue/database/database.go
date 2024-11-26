@@ -418,7 +418,10 @@ func (q *DBQueue) Dequeue(tenantId int64, queueName string, numToDequeue int, re
 
 	var messages []Message
 
-	res := q.DBG.Preload("KV").Where(
+	tx := q.DBG.Begin()
+	defer tx.Rollback()
+
+	res := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Preload("KV").Where(
 		"deliver_at <= ? AND delivered_at <= ? AND (tries < max_tries OR max_tries = -1) AND tenant_id = ? AND queue_id = ?",
 		now, now, tenantId, queue.ID).
 		Limit(maxToDequeue).
@@ -443,44 +446,38 @@ func (q *DBQueue) Dequeue(tenantId int64, queueName string, numToDequeue int, re
 		messageIDs[i] = message.ID
 	}
 
-	err = q.DBG.Transaction(func(tx *gorm.DB) error {
-		res = tx.Model(&Message{}).Where("tenant_id = ? AND queue_id = ? AND id in ?", tenantId, queue.ID, messageIDs).
-			UpdateColumns(map[string]any{
-				"tries":        gorm.Expr("tries+1"),
-				"delivered_at": now,
-				"deliver_at":   gorm.Expr("?", now+int64(visibilityTimeout)),
-			})
+	res = tx.Model(&Message{}).Where("tenant_id = ? AND queue_id = ? AND id in ?", tenantId, queue.ID, messageIDs).
+		UpdateColumns(map[string]any{
+			"tries":        gorm.Expr("tries+1"),
+			"delivered_at": now,
+			"deliver_at":   gorm.Expr("?", now+int64(visibilityTimeout)),
+		})
 
-		if res.Error != nil {
-			return res.Error
+	if res.Error != nil {
+		return nil, res.Error
+	}
+
+	if queue.RateLimit > 0 {
+		bucket := RateLimit{
+			TenantID: tenantId,
+			QueueID:  queue.ID,
+			Ts:       now,
+			N:        len(messageIDs),
 		}
+		res = tx.Clauses(clause.OnConflict{
+			DoUpdates: clause.Assignments(map[string]interface{}{"n": gorm.Expr("n + ?", len(messageIDs))}),
+		}).Create(&bucket)
 
-		if queue.RateLimit > 0 {
-			bucket := RateLimit{
-				TenantID: tenantId,
-				QueueID:  queue.ID,
-				Ts:       now,
-				N:        len(messageIDs),
-			}
-			res = tx.Clauses(clause.OnConflict{
-				DoUpdates: clause.Assignments(map[string]interface{}{"n": gorm.Expr("n + ?", len(messageIDs))}),
-			}).Create(&bucket)
-
-			if res.Error != nil && !errors.Is(res.Error, gorm.ErrDuplicatedKey) {
-				return res.Error
-			}
+		if res.Error != nil && !errors.Is(res.Error, gorm.ErrDuplicatedKey) {
+			return nil, res.Error
 		}
-
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
 	}
 
 	for _, messageId := range messageIDs {
 		log.Debug().Int64("message_id", messageId).Msg("Dequeued message")
 	}
+
+	tx.Commit()
 
 	return rc, nil
 }
