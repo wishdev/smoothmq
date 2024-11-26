@@ -585,13 +585,12 @@ func (q *DBQueue) Filter(tenantId int64, queueName string, filterCriteria models
 		sql += " ) GROUP BY message_id HAVING count(*) = ? LIMIT 10"
 		sql += " ) "
 
-	}
+		for k, v := range filterCriteria.KV {
+			args = append(args, k, v, tenantId, queue.ID)
+		}
 
-	for k, v := range filterCriteria.KV {
-		args = append(args, k, v, tenantId, queue.ID)
+		args = append(args, len(filterCriteria.KV))
 	}
-
-	args = append(args, len(filterCriteria.KV))
 
 	sql += "LIMIT 10"
 
